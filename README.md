@@ -19,7 +19,7 @@ pip install deepseek-cli
 Or install from source:
 
 ```bash
-git clone https://github.com/yourusername/deepseek-cli
+git clone https://github.com/epinusai/epinus-deepseek-v3.1671bil
 cd deepseek-cli
 pip install -e .
 ```

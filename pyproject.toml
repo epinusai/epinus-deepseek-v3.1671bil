@@ -42,9 +42,9 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/yourusername/deepseek-cli"
-Repository = "https://github.com/yourusername/deepseek-cli"
-Issues = "https://github.com/yourusername/deepseek-cli/issues"
+Homepage = "https://github.com/epinusai/epinus-deepseek-v3.1671bil"
+Repository = "https://github.com/epinusai/epinus-deepseek-v3.1671bil"
+Issues = "https://github.com/epinusai/epinus-deepseek-v3.1671bil/issues"
 
 [project.scripts]
 deepseek = "deepseek_cli.main:main"
