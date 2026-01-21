@@ -383,7 +383,7 @@ class DSK:
             return True
         return False
 
-    # Patterns for long-running/polling commands (servers + builds)
+    # Patterns for long-running/polling commands (servers + builds + scaffolding)
     LONG_RUNNING_CMDS = ['npm run dev', 'npm start', 'yarn dev', 'yarn start',
                          'pnpm dev', 'pnpm start', 'next dev', 'vite',
                          'python -m http.server', 'flask run', 'uvicorn',
@@ -391,7 +391,10 @@ class DSK:
                          # Build commands (can take a while)
                          'npm run build', 'yarn build', 'pnpm build', 'next build',
                          'webpack', 'tsc', 'npm run lint', 'yarn lint',
-                         'npm test', 'yarn test', 'pytest', 'cargo build', 'go build']
+                         'npm test', 'yarn test', 'pytest', 'cargo build', 'go build',
+                         # Scaffolding commands (slow to start)
+                         'npx create-', 'npm create', 'yarn create', 'pnpm create',
+                         'npm install', 'yarn install', 'pnpm install', 'pip install']
 
     # Success patterns indicating task is done/ready
     SUCCESS_PATTERNS = ['ready on', 'listening on', 'started at', 'server running',
@@ -421,10 +424,13 @@ class DSK:
 
         is_server = self._is_long_running(cmd)
         if is_server:
-            self._print(f"  [dim]{sym('vline')} Detected server command - polling mode[/dim]")
+            self._print(f"  [dim]{sym('vline')} Long-running command - polling mode[/dim]")
             return self._run_server_command(cmd)
 
         start_time = time.time()
+        spinner = Spinner("Running")
+        spinner.start()
+
         try:
             process = subprocess.Popen(
                 cmd, shell=True,
@@ -433,7 +439,11 @@ class DSK:
             )
 
             output_lines = []
+            first_output = True
             for line in iter(process.stdout.readline, ''):
+                if first_output:
+                    spinner.stop()
+                    first_output = False
                 line = line.rstrip()
                 output_lines.append(line)
                 elapsed = time.time() - start_time
@@ -444,6 +454,7 @@ class DSK:
                     self._print(f"  [dim]{sym('vline')} ... streaming ({elapsed:.1f}s)[/dim]")
 
             process.wait()
+            spinner.stop()
             elapsed = time.time() - start_time
 
             # Summary stats
@@ -458,10 +469,12 @@ class DSK:
             return '\n'.join(output_lines), process.returncode
 
         except KeyboardInterrupt:
+            spinner.stop()
             process.kill()
             self._print(f"  [yellow]{sym('warn')} Interrupted by user[/yellow]")
             return "INTERRUPTED", -999  # Special code for user interruption
         except Exception as e:
+            spinner.stop()
             self._print(f"  [red]{sym('cross')} Error: {e}[/red]")
             return str(e), -1
 
