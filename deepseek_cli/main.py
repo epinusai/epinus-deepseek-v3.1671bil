@@ -110,7 +110,6 @@ DEFAULT_CONFIG = {
     "temperature": 0.7,
     "auto_execute": False,
     "mode": "normal",  # normal, concise, explain
-    "num_ctx": None,  # Custom context window (None = use model default)
 }
 
 
@@ -207,6 +206,11 @@ class DSK:
         self.tokens_in = 0
         self.tokens_out = 0
 
+        # Compaction state (Claude Code style)
+        self._compacted_summary = None  # State summary after compaction
+        self._recent_turns = 10  # Keep last N turns after compaction
+        self._compaction_threshold = 0.70  # Trigger at 70% of context
+
         if session_id:
             self._load_session()
 
@@ -267,6 +271,90 @@ class DSK:
             conn.close()
         except sqlite3.Error:
             pass
+
+    def _needs_compaction(self):
+        """Check if context needs compaction (Claude Code style)"""
+        if self._compacted_summary:
+            # Already compacted - check if we need to re-compact
+            recent_text = json.dumps(self.session_messages[-self._recent_turns * 2:])
+            recent_tokens = estimate_tokens(recent_text) + estimate_tokens(self._compacted_summary)
+        else:
+            # Not compacted yet - check full context
+            full_text = json.dumps(self.session_messages)
+            recent_tokens = estimate_tokens(full_text)
+
+        context_limit = get_model_context_limit(self.config["model"])
+        return recent_tokens > (context_limit * self._compaction_threshold)
+
+    def _generate_state_summary(self):
+        """Generate a state summary using AI (not chat summary - task/state summary)"""
+        self._print(f"\n[yellow]{sym('warn')} Context at threshold - compacting...[/yellow]")
+
+        # Build prompt for state summary
+        summary_prompt = """Summarize the current state of this conversation for context continuity.
+Include:
+- Current goal/task
+- Key decisions made
+- Important constraints or requirements
+- Unresolved questions
+- Critical context needed to continue
+
+Be concise but complete. This is a STATE summary, not a chat summary.
+Format as bullet points."""
+
+        messages = [
+            {"role": "system", "content": "You are a helpful assistant that summarizes conversation state."},
+            {"role": "user", "content": f"Here is the conversation to summarize:\n\n{json.dumps(self.session_messages, indent=2)}\n\n{summary_prompt}"}
+        ]
+
+        try:
+            if OLLAMA_SDK:
+                response = ollama.chat(
+                    model=self.config["model"],
+                    messages=messages,
+                    stream=False,
+                    options={"temperature": 0.3}  # Lower temp for accurate summary
+                )
+                return response.message.content
+        except Exception as e:
+            self._print(f"[red]{sym('cross')} Compaction failed: {e}[/red]")
+            return None
+
+        return None
+
+    def _compact_context(self):
+        """Perform context compaction (Claude Code style)"""
+        # Step 1: Generate state summary
+        summary = self._generate_state_summary()
+        if not summary:
+            return False
+
+        # Step 2: Store the summary
+        self._compacted_summary = summary
+
+        # Step 3: Keep only recent turns in active memory
+        # (Full history still in SQLite!)
+        old_count = len(self.session_messages)
+        if len(self.session_messages) > self._recent_turns * 2:
+            self.session_messages = self.session_messages[-self._recent_turns * 2:]
+
+        # Step 4: Reset token counters for new context window
+        self.tokens_in = estimate_tokens(summary)
+        self.tokens_out = 0
+
+        self._print(f"[green]{sym('check')} Compacted: {old_count} msgs → summary + {len(self.session_messages)} recent[/green]")
+        self._print(f"[dim]  Full history preserved in SQLite[/dim]")
+        return True
+
+    def _get_messages_for_context(self):
+        """Get messages to send to model (summary + recent turns if compacted)"""
+        if self._compacted_summary:
+            # After compaction: summary + recent turns
+            summary_msg = {"role": "system", "content": f"[CONTEXT SUMMARY]\n{self._compacted_summary}\n[END SUMMARY]"}
+            return [summary_msg] + self.session_messages[-self._recent_turns * 2:]
+        else:
+            # Before compaction: full history
+            return self.session_messages
 
     @staticmethod
     def get_active_session():
@@ -769,9 +857,14 @@ python myfile.py
         return actions
 
     def _stream_response(self, user_message):
-        """Stream AI response with live output"""
+        """Stream AI response with live output (with auto-compaction)"""
+        # Check if compaction is needed BEFORE this turn
+        if self._needs_compaction():
+            self._compact_context()
+
+        # Build messages: system + context (summary + recent if compacted) + new user message
         messages = [{"role": "system", "content": self._get_system_prompt(user_message)}]
-        messages.extend(self.session_messages)
+        messages.extend(self._get_messages_for_context())
         messages.append({"role": "user", "content": user_message})
 
         full_response = ""
@@ -795,11 +888,6 @@ python myfile.py
 
         try:
             if OLLAMA_SDK:
-                # Build options
-                opts = {"temperature": self.config["temperature"]}
-                if self.config.get("num_ctx"):
-                    opts["num_ctx"] = self.config["num_ctx"]
-
                 stream = ollama.chat(
                     model=self.config["model"],
                     messages=messages,
@@ -1191,10 +1279,6 @@ python myfile.py
         try:
             if OLLAMA_SDK:
                 response_text = ""
-                opts = {"temperature": self.config["temperature"]}
-                if self.config.get("num_ctx"):
-                    opts["num_ctx"] = self.config["num_ctx"]
-
                 stream = ollama.chat(
                     model=self.config["model"],
                     messages=messages,
@@ -1319,57 +1403,30 @@ python myfile.py
             self.session_messages = []
             self.tokens_in = 0
             self.tokens_out = 0
+            self._compacted_summary = None  # Reset compaction state
             self._print(f"[green]{sym('check')} Session cleared, context reset[/green]")
 
         elif command == '/tokens':
             total = self.tokens_in + self.tokens_out
-            custom_ctx = self.config.get("num_ctx")
-            context_limit = custom_ctx if custom_ctx else get_model_context_limit(self.config["model"])
+            context_limit = get_model_context_limit(self.config["model"])
             context_pct = min(100, (total / context_limit) * 100)
+            compacted = "Yes" if getattr(self, '_compacted_summary', None) else "No"
             self._print(f"\n[bold]Token Usage:[/bold]")
-            self._print(f"  Model:   {self.config['model']}")
-            self._print(f"  Context: {format_tokens(context_limit)}{' (custom)' if custom_ctx else ' (default)'}")
-            self._print(f"  Input:   {format_tokens(self.tokens_in)}")
-            self._print(f"  Output:  {format_tokens(self.tokens_out)}")
-            self._print(f"  Total:   {format_tokens(total)} ({context_pct:.0f}%)")
+            self._print(f"  Model:    {self.config['model']}")
+            self._print(f"  Limit:    {format_tokens(context_limit)}")
+            self._print(f"  Used:     {format_tokens(total)} ({context_pct:.0f}%)")
             self._print(f"  Messages: {len(self.session_messages)}")
+            self._print(f"  Compacted: {compacted}")
             if context_pct > 70:
-                self._print(f"  [yellow]{sym('warn')} Context getting full - consider /compact[/yellow]")
+                self._print(f"  [yellow]{sym('warn')} Context high - auto-compaction will trigger soon[/yellow]")
 
-        elif command == '/context':
-            if arg:
-                # Parse context size (supports k/K suffix)
-                try:
-                    size = arg.lower().replace('k', '000').replace('m', '000000')
-                    num_ctx = int(size)
-                    self.config["num_ctx"] = num_ctx
-                    self._save_config()
-                    self._print(f"[green]{sym('check')} Context window set to {format_tokens(num_ctx)}[/green]")
-                    self._print(f"[dim]Note: May not work if model/provider doesn't support it[/dim]")
-                except ValueError:
-                    self._print(f"[red]{sym('cross')} Invalid size. Use: /context 500k or /context 1000000[/red]")
-            else:
-                current = self.config.get("num_ctx")
-                default = get_model_context_limit(self.config["model"])
-                if current:
-                    self._print(f"  Context: {format_tokens(current)} (custom)")
-                else:
-                    self._print(f"  Context: {format_tokens(default)} (model default)")
-                self._print(f"  [dim]Set with: /context 500k or /context 1m[/dim]")
 
         elif command == '/compact':
-            # Keep only last N messages to free context
-            keep = int(arg) if arg and arg.isdigit() else 10
-            if len(self.session_messages) > keep:
-                removed = len(self.session_messages) - keep
-                self.session_messages = self.session_messages[-keep:]
-                # Recalculate tokens
-                total_text = json.dumps(self.session_messages)
-                self.tokens_in = estimate_tokens(total_text)
-                self.tokens_out = 0
-                self._print(f"[green]{sym('check')} Compacted: kept last {keep} messages, removed {removed}[/green]")
-            else:
+            # Force compaction now (Claude Code style)
+            if len(self.session_messages) < 4:
                 self._print(f"[dim]Only {len(self.session_messages)} messages - nothing to compact[/dim]")
+            else:
+                self._compact_context()
 
         elif command == '/sessions':
             sessions = self.list_sessions()
@@ -1457,8 +1514,7 @@ python myfile.py
   /mode <m>      Set mode: concise | explain | normal
   /auto          Toggle auto-execute
   /tokens        Show token/context usage
-  /context [n]   Set context window (e.g. /context 500k)
-  /compact [n]   Keep only last n messages (default 10)
+  /compact       Force context compaction now
   /status        Check last task status
   /kill          Kill background task
   /cd <path>     Change directory
@@ -1468,7 +1524,7 @@ python myfile.py
   /exit          Quit
 
 [bold]Context:[/bold]
-  /tokens to check usage, /context to resize, /compact to trim
+  Auto-compacts at ~70% - keeps summary + last 10 turns
 """)
 
         else:
@@ -1575,7 +1631,6 @@ def main():
     parser.add_argument("--explain", "-e", action="store_true", help="Explain mode - teaching style")
     parser.add_argument("--select", "-s", action="store_true", help="Select model at startup")
     parser.add_argument("--model", "-m", type=str, help="Model name directly")
-    parser.add_argument("--context", type=str, help="Context window size (e.g. 500k, 1m)")
     parser.add_argument("--dir", "-d", type=str, help="Working directory")
 
     args = parser.parse_args()
@@ -1626,12 +1681,6 @@ def main():
             dsk.config["model"] = selected
             dsk._save_config()
 
-    if args.context:
-        try:
-            size = args.context.lower().replace('k', '000').replace('m', '000000')
-            dsk.config["num_ctx"] = int(size)
-        except ValueError:
-            pass
 
     if args.prompt:
         dsk.chat(" ".join(args.prompt))
