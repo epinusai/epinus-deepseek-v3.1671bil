@@ -49,16 +49,19 @@ except ImportError:
 # Prompt toolkit for input & menus
 try:
     from prompt_toolkit import prompt as pt_prompt, PromptSession
-    from prompt_toolkit.history import FileHistory
+    from prompt_toolkit.history import FileHistory, InMemoryHistory
     from prompt_toolkit.styles import Style as PTStyle
     from prompt_toolkit.key_binding import KeyBindings
     from prompt_toolkit.keys import Keys
     from prompt_toolkit.application import Application
     from prompt_toolkit.layout import Layout, ScrollablePane
-    from prompt_toolkit.layout.containers import Window, HSplit, VSplit
-    from prompt_toolkit.layout.controls import FormattedTextControl
+    from prompt_toolkit.layout.containers import Window, HSplit, VSplit, WindowAlign
+    from prompt_toolkit.layout.controls import FormattedTextControl, BufferControl
+    from prompt_toolkit.layout.dimension import Dimension
     from prompt_toolkit.formatted_text import HTML, ANSI
-    from prompt_toolkit.widgets import TextArea
+    from prompt_toolkit.widgets import TextArea, Frame
+    from prompt_toolkit.buffer import Buffer
+    from prompt_toolkit.document import Document
     PROMPT_TOOLKIT = True
 except ImportError:
     PROMPT_TOOLKIT = False
@@ -805,70 +808,274 @@ python app.py
                     self.chat(f"[AUTO] Done. Results:\n{context}\n\nContinue with the next step.", auto_continue=True)
 
     def interactive(self):
-        """Interactive chat loop with input at bottom"""
-        # Show header
-        if RICH_AVAILABLE:
-            model = self.config['model'][:40]
-            dir_name = Path(self.working_dir).name[:30]
-
-            console.print()
-            console.print(Panel.fit(
-                f"[bold cyan]DeepSeek CLI[/bold cyan] [dim]v0.1.0[/dim]\n\n"
-                f"[dim]Model:[/dim]     [cyan]{model}[/cyan]\n"
-                f"[dim]Directory:[/dim] [white]{dir_name}[/white]\n"
-                f"[dim]Session:[/dim]   [dim]{self.session_id}[/dim]\n\n"
-                f"[dim]/help[/dim] commands  [dim]/status[/dim] check task  [dim]/exit[/dim] quit",
-                border_style="cyan"
-            ))
-        else:
-            print(f"\nDeepSeek CLI v0.1.0")
-            print(f"Model: {self.config['model']}")
-            print(f"Type /help for commands\n")
-
-        history_file = CONFIG_DIR / "history.txt"
-        history = FileHistory(str(history_file)) if PROMPT_TOOLKIT else None
-
-        # Create prompt session with bottom toolbar
+        """Interactive chat loop - full screen with input at bottom"""
         if PROMPT_TOOLKIT:
-            session = PromptSession(
-                history=history,
-                style=PTStyle.from_dict({
-                    'prompt': '#00aaff bold',
-                    'bottom-toolbar': 'bg:#333333 #888888',
-                }),
-                bottom_toolbar=lambda: HTML(
-                    f'<b>[{Path(self.working_dir).name}]</b> '
-                    f'<style fg="#666666">/help · /status · /exit</style>'
-                ),
-            )
+            self._interactive_fullscreen()
+        else:
+            self._interactive_simple()
+
+    def _interactive_simple(self):
+        """Fallback simple interactive mode"""
+        print(f"\nDeepSeek CLI v0.1.0")
+        print(f"Model: {self.config['model']}")
+        print(f"Type /help for commands\n")
 
         while True:
             try:
-                # Get input
                 dir_name = Path(self.working_dir).name
-                if PROMPT_TOOLKIT and session:
-                    prompt_msg = [('class:prompt', '› ')]
-                    user_input = session.prompt(prompt_msg).strip()
-                else:
-                    print(f"[{dir_name}] › ", end="", flush=True)
-                    user_input = input().strip()
+                print(f"[{dir_name}] › ", end="", flush=True)
+                user_input = input().strip()
 
                 if not user_input:
                     continue
-
                 if user_input.startswith('/'):
                     self._handle_command(user_input)
                     continue
-
                 self.chat(user_input)
-
             except KeyboardInterrupt:
-                self._print("\n[dim]Ctrl-C - type /exit to quit[/dim]")
+                print("\nCtrl-C - type /exit to quit")
             except EOFError:
                 break
 
         self._close_session()
-        self._print("[cyan]Goodbye![/cyan]")
+        print("Goodbye!")
+
+    def _interactive_fullscreen(self):
+        """Full screen mode with fixed input at bottom"""
+        # Output buffer
+        self.output_lines = []
+        self._add_output(f"╭─ DeepSeek CLI v0.1.0 ─────────────────────────────────╮")
+        self._add_output(f"│ Model: {self.config['model'][:45]:<45} │")
+        self._add_output(f"│ Dir:   {Path(self.working_dir).name[:45]:<45} │")
+        self._add_output(f"╰─ /help · /status · /exit ─────────────────────────────╯")
+        self._add_output("")
+
+        # History
+        history = InMemoryHistory()
+        history_file = CONFIG_DIR / "history.txt"
+        if history_file.exists():
+            try:
+                for line in history_file.read_text().splitlines()[-100:]:
+                    if line.startswith('+'):
+                        history.append_string(line[1:])
+            except:
+                pass
+
+        # Key bindings
+        kb = KeyBindings()
+        self._should_exit = False
+        self._pending_input = None
+
+        @kb.add('enter')
+        def submit(event):
+            buf = event.app.current_buffer
+            self._pending_input = buf.text
+            buf.reset()
+            event.app.exit()
+
+        @kb.add('c-c')
+        def ctrl_c(event):
+            self._pending_input = None
+            event.app.exit()
+
+        @kb.add('c-d')
+        def ctrl_d(event):
+            self._should_exit = True
+            event.app.exit()
+
+        # Styles
+        style = PTStyle.from_dict({
+            'output': '#ffffff',
+            'input': '#00aaff',
+            'border': '#444444',
+            'toolbar': 'bg:#1a1a1a #666666',
+        })
+
+        while not self._should_exit:
+            try:
+                # Create output area
+                output_text = '\n'.join(self.output_lines[-500:])  # Keep last 500 lines
+                output_area = TextArea(
+                    text=output_text,
+                    read_only=True,
+                    scrollbar=True,
+                    style='class:output',
+                    wrap_lines=True,
+                )
+                # Scroll to bottom
+                output_area.buffer.cursor_position = len(output_text)
+
+                # Create input area
+                input_area = TextArea(
+                    height=3,
+                    prompt=f'[{Path(self.working_dir).name}] › ',
+                    style='class:input',
+                    multiline=False,
+                    wrap_lines=True,
+                )
+
+                # Toolbar
+                def get_toolbar():
+                    return HTML('<style bg="#1a1a1a" fg="#666666"> Enter: send · Ctrl+C: cancel · Ctrl+D: exit </style>')
+
+                # Layout
+                layout = Layout(
+                    HSplit([
+                        output_area,
+                        Window(height=1, char='─', style='class:border'),
+                        input_area,
+                        Window(height=1, content=FormattedTextControl(get_toolbar), style='class:toolbar'),
+                    ])
+                )
+
+                # Create and run app
+                app = Application(
+                    layout=layout,
+                    key_bindings=kb,
+                    style=style,
+                    full_screen=True,
+                    mouse_support=True,
+                )
+
+                # Focus input
+                app.layout.focus(input_area)
+
+                app.run()
+
+                # Process input
+                if self._pending_input is not None:
+                    user_input = self._pending_input.strip()
+                    self._pending_input = None
+
+                    if not user_input:
+                        continue
+
+                    # Save to history
+                    history.append_string(user_input)
+                    try:
+                        with open(history_file, 'a') as f:
+                            f.write(f'+{user_input}\n')
+                    except:
+                        pass
+
+                    # Show user input
+                    self._add_output(f"\n[You] › {user_input}")
+
+                    if user_input.startswith('/'):
+                        self._handle_command_fullscreen(user_input)
+                        continue
+
+                    # Process chat
+                    self._chat_fullscreen(user_input)
+
+            except KeyboardInterrupt:
+                self._add_output("\n[Interrupted]")
+            except Exception as e:
+                self._add_output(f"\n[Error: {e}]")
+
+        self._close_session()
+        print("\033[2J\033[H")  # Clear screen
+        print("Goodbye!")
+
+    def _add_output(self, text):
+        """Add text to output buffer"""
+        self.output_lines.append(text)
+
+    def _chat_fullscreen(self, message):
+        """Chat in fullscreen mode"""
+        self._add_output(f"\n[DeepSeek] ›")
+
+        # Get response
+        messages = [{"role": "system", "content": self._get_system_prompt(message)}]
+        messages.extend(self.session_messages)
+        messages.append({"role": "user", "content": message})
+
+        try:
+            if OLLAMA_SDK:
+                response_text = ""
+                stream = ollama.chat(
+                    model=self.config["model"],
+                    messages=messages,
+                    stream=True,
+                    options={"temperature": self.config["temperature"]}
+                )
+
+                current_line = ""
+                for chunk in stream:
+                    if chunk.message.content:
+                        text = chunk.message.content
+                        response_text += text
+                        current_line += text
+
+                        # Split on newlines
+                        while '\n' in current_line:
+                            line, current_line = current_line.split('\n', 1)
+                            self._add_output(line)
+
+                # Add remaining text
+                if current_line:
+                    self._add_output(current_line)
+
+                self._save_message("user", message)
+                self._save_message("assistant", response_text)
+
+                # Extract and process actions
+                actions = self._extract_actions(response_text)
+                if actions:
+                    self._add_output(f"\n[Actions: {len(actions)}]")
+                    for action in actions:
+                        if action[0] == 'cmd':
+                            self._add_output(f"  › Run: {action[1][:50]}")
+                            if self.config.get("auto_execute"):
+                                output, code = self._run_command(action[1])
+                                self._add_output(f"  Exit: {code}")
+                        elif action[0] == 'file':
+                            self._add_output(f"  › File: {action[1]}")
+
+        except Exception as e:
+            self._add_output(f"[Error: {e}]")
+
+    def _handle_command_fullscreen(self, cmd):
+        """Handle slash commands in fullscreen mode"""
+        parts = cmd.split(maxsplit=1)
+        command = parts[0].lower()
+        arg = parts[1] if len(parts) > 1 else ""
+
+        if command in ('/exit', '/quit', '/q'):
+            self._should_exit = True
+        elif command == '/help':
+            self._add_output("\nCommands:")
+            self._add_output("  /status  - Check last task")
+            self._add_output("  /auto    - Toggle auto-execute")
+            self._add_output("  /clear   - Clear output")
+            self._add_output("  /cd      - Change directory")
+            self._add_output("  /exit    - Quit")
+        elif command == '/status':
+            status, msg = self._get_task_status()
+            if status:
+                self._add_output(f"\n[Task Status: {status}]")
+                self._add_output(msg)
+            else:
+                self._add_output("\n[No recent task]")
+        elif command == '/auto':
+            self.config["auto_execute"] = not self.config.get("auto_execute", False)
+            status = "ON" if self.config["auto_execute"] else "OFF"
+            self._add_output(f"\n[Auto-execute: {status}]")
+            self._save_config()
+        elif command == '/clear':
+            self.output_lines = ["[Cleared]"]
+        elif command == '/cd':
+            if arg:
+                try:
+                    os.chdir(os.path.expanduser(arg))
+                    self.working_dir = os.getcwd()
+                    self._add_output(f"\n[Changed to: {self.working_dir}]")
+                except Exception as e:
+                    self._add_output(f"\n[Error: {e}]")
+            else:
+                self._add_output(f"\n[Current: {self.working_dir}]")
+        else:
+            self._add_output(f"\n[Unknown command: {command}]")
 
     def _handle_command(self, cmd):
         """Handle slash commands"""
