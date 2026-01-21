@@ -525,11 +525,12 @@ Format as bullet points."""
 
     def _run_command(self, cmd):
         """Execute command with live streaming output and stats"""
-        self._print(f"  [dim]$ {cmd[:70]}{'...' if len(cmd) > 70 else ''}[/dim]")
+        # Always show which command is running (force=True)
+        self._print(f"  [dim]$ {cmd[:70]}{'...' if len(cmd) > 70 else ''}[/dim]", force=True)
 
         is_server = self._is_long_running(cmd)
         if is_server:
-            self._print(f"  [dim]{sym('vline')} Long-running command - polling mode[/dim]")
+            self._print(f"  [dim]{sym('vline')} Long-running command - polling mode[/dim]", force=True)
             return self._run_server_command(cmd)
 
         start_time = time.time()
@@ -566,21 +567,22 @@ Format as bullet points."""
             if len(output_lines) > 12:
                 self._print(f"  [dim]{sym('vline')} {len(output_lines)} lines in {elapsed:.1f}s[/dim]")
 
+            # Always show success/fail status (force=True)
             if process.returncode == 0:
-                self._print(f"  [green]{sym('check')} Done ({elapsed:.1f}s)[/green]")
+                self._print(f"  [green]{sym('check')} Done ({elapsed:.1f}s)[/green]", force=True)
             else:
-                self._print(f"  [red]{sym('cross')} Failed (exit {process.returncode}, {elapsed:.1f}s)[/red]")
+                self._print(f"  [red]{sym('cross')} Failed (exit {process.returncode}, {elapsed:.1f}s)[/red]", force=True)
 
             return '\n'.join(output_lines), process.returncode
 
         except KeyboardInterrupt:
             spinner.stop()
             process.kill()
-            self._print(f"  [yellow]{sym('warn')} Interrupted by user[/yellow]")
+            self._print(f"  [yellow]{sym('warn')} Interrupted by user[/yellow]", force=True)
             return "INTERRUPTED", -999  # Special code for user interruption
         except Exception as e:
             spinner.stop()
-            self._print(f"  [red]{sym('cross')} Error: {e}[/red]")
+            self._print(f"  [red]{sym('cross')} Error: {e}[/red]", force=True)
             return str(e), -1
 
     def _run_server_command(self, cmd):
@@ -757,9 +759,10 @@ Format as bullet points."""
         full_path = os.path.join(self.working_dir, filepath)
         is_new = not os.path.exists(full_path)
 
-        # Preview
-        self._print(f"\n  [bold {'green' if is_new else 'yellow'}]{'+ New' if is_new else '~ Edit'}:[/bold {'green' if is_new else 'yellow'}] {filepath}")
+        # Always show file header (force=True)
+        self._print(f"\n  [bold {'green' if is_new else 'yellow'}]{'+ New' if is_new else '~ Edit'}:[/bold {'green' if is_new else 'yellow'}] {filepath}", force=True)
 
+        # File content preview (can be collapsed)
         lines = content.split('\n')
         for i, line in enumerate(lines[:10], 1):
             self._print(f"  [dim]{i:3}[/dim] [{'green' if is_new else 'yellow'}]{sym('vline')} {line}[/{'green' if is_new else 'yellow'}]")
@@ -767,14 +770,15 @@ Format as bullet points."""
             self._print(f"  [dim]    {sym('vline')} ... ({len(lines) - 10} more lines)[/dim]")
 
         if not self._ask_permission(f"Write {len(lines)} lines to {filepath}"):
-            self._print(f"  [dim]{sym('corner')} Skipped[/dim]")
+            self._print(f"  [dim]{sym('corner')} Skipped[/dim]", force=True)
             return False
 
         os.makedirs(os.path.dirname(full_path) or '.', exist_ok=True)
         with open(full_path, 'w', encoding='utf-8') as f:
             f.write(content)
 
-        self._print(f"  [green]{sym('check')} Wrote {filepath}[/green]")
+        # Always show result (force=True)
+        self._print(f"  [green]{sym('check')} Wrote {filepath}[/green]", force=True)
         return True
 
     def _get_system_prompt(self, user_query=""):
