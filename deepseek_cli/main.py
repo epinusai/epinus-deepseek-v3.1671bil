@@ -47,6 +47,13 @@ try:
 except ImportError:
     OLLAMA_SDK = False
 
+# Groq SDK
+try:
+    from groq import Groq
+    GROQ_SDK = True
+except ImportError:
+    GROQ_SDK = False
+
 # Prompt toolkit for input & menus
 try:
     from prompt_toolkit import prompt as pt_prompt, PromptSession
@@ -105,12 +112,23 @@ CONFIG_FILE = CONFIG_DIR / "config.json"
 SESSIONS_DIR = CONFIG_DIR / "sessions"
 
 DEFAULT_CONFIG = {
+    "provider": "ollama",  # ollama or groq
     "model": "deepseek-v3.1:671b-cloud",
+    "groq_model": "compound-beta",  # Groq compound model
     "max_tokens": 4096,
     "temperature": 0.7,
     "auto_execute": False,
     "mode": "normal",  # normal, concise, explain
 }
+
+# Groq models
+GROQ_MODELS = [
+    "compound-beta",
+    "llama-3.3-70b-versatile",
+    "llama-3.1-8b-instant",
+    "mixtral-8x7b-32768",
+    "gemma2-9b-it",
+]
 
 
 class Spinner:
@@ -178,11 +196,24 @@ def get_model_context_limit(model_name):
         pass
 
     # Fallback defaults by model name
-    if 'deepseek' in model_name.lower():
-        return 163840  # 160k
-    elif 'gpt-oss' in model_name.lower():
+    model_lower = model_name.lower()
+
+    # Groq models
+    if 'compound' in model_lower:
         return 131072  # 128k
-    elif 'qwen' in model_name.lower():
+    elif 'llama-3.3' in model_lower or 'llama-3.1' in model_lower:
+        return 131072  # 128k
+    elif 'mixtral' in model_lower:
+        return 32768  # 32k
+    elif 'gemma' in model_lower:
+        return 8192  # 8k
+
+    # Ollama models
+    if 'deepseek' in model_lower:
+        return 163840  # 160k
+    elif 'gpt-oss' in model_lower:
+        return 131072  # 128k
+    elif 'qwen' in model_lower:
         return 131072  # 128k
     else:
         return 128000  # Safe default
@@ -216,8 +247,21 @@ class DSK:
         self._buffering_actions = False  # Flag to buffer instead of print
         self._last_actions_output = []  # Last completed action set
 
+        # Groq client (initialized on demand)
+        self._groq_client = None
+
         if session_id:
             self._load_session()
+
+    def _get_groq_client(self):
+        """Get or create Groq client"""
+        if self._groq_client is None and GROQ_SDK:
+            api_key = os.environ.get("GROQ_API_KEY")
+            if not api_key:
+                self._print("[red]GROQ_API_KEY not set. Export it: export GROQ_API_KEY=your_key[/red]")
+                return None
+            self._groq_client = Groq(api_key=api_key)
+        return self._groq_client
 
     def _load_config(self):
         if CONFIG_FILE.exists():
@@ -926,7 +970,54 @@ python myfile.py
         spinner.start()
 
         try:
-            if OLLAMA_SDK:
+            provider = self.config.get("provider", "ollama")
+
+            if provider == "groq" and GROQ_SDK:
+                # Use Groq API
+                client = self._get_groq_client()
+                if not client:
+                    spinner.stop()
+                    return None
+
+                stream = client.chat.completions.create(
+                    model=self.config.get("groq_model", "compound-beta"),
+                    messages=messages,
+                    stream=True,
+                    temperature=self.config["temperature"],
+                    max_tokens=self.config.get("max_tokens", 4096),
+                )
+
+                for chunk in stream:
+                    if first_token:
+                        spinner.stop()
+                        print(WHITE, end="", flush=True)
+                        first_token = False
+                    if chunk.choices and chunk.choices[0].delta.content:
+                        text = chunk.choices[0].delta.content
+                        full_response += text
+
+                        for char in text:
+                            if char == '`':
+                                backtick_count += 1
+                            else:
+                                if backtick_count >= 3:
+                                    in_code_block = not in_code_block
+                                    print('`' * backtick_count, end="", flush=True)
+                                    print(BLUE if in_code_block else WHITE, end="", flush=True)
+                                elif backtick_count > 0:
+                                    print('`' * backtick_count, end="", flush=True)
+                                backtick_count = 0
+                                print(char, end="", flush=True)
+
+                if backtick_count >= 3:
+                    in_code_block = not in_code_block
+                    print('`' * backtick_count, end="", flush=True)
+                elif backtick_count > 0:
+                    print('`' * backtick_count, end="", flush=True)
+                print(RESET)
+
+            elif OLLAMA_SDK:
+                # Use Ollama
                 stream = ollama.chat(
                     model=self.config["model"],
                     messages=messages,
@@ -989,7 +1080,14 @@ python myfile.py
         output_tokens = estimate_tokens(full_response)
         self.tokens_out += output_tokens
         total_context = self.tokens_in + self.tokens_out
-        context_limit = get_model_context_limit(self.config["model"])
+
+        # Get context limit based on provider
+        provider = self.config.get("provider", "ollama")
+        if provider == "groq":
+            current_model = self.config.get("groq_model", "compound-beta")
+        else:
+            current_model = self.config["model"]
+        context_limit = get_model_context_limit(current_model)
         context_pct = min(100, (total_context / context_limit) * 100)
 
         self._print(f"\n[dim]  tokens: in={format_tokens(input_tokens)} out={format_tokens(output_tokens)} | context: {format_tokens(total_context)} ({context_pct:.0f}%)[/dim]")
@@ -1144,10 +1242,17 @@ python myfile.py
         mode = self.config.get("mode", "normal")
         mode_str = f" [{mode}]" if mode != "normal" else ""
 
+        # Provider/model info
+        provider = self.config.get("provider", "ollama")
+        if provider == "groq":
+            model_info = f"Groq: {self.config.get('groq_model', 'compound-beta')}"
+        else:
+            model_info = f"Ollama: {self.config['model']}"
+
         self._print(f"\n[bold cyan]DeepSeek CLI[/bold cyan] v0.1.0{mode_str}")
         self._print(f"[dim]I bootstrap, refactor, and debug projects in your repo.[/dim]")
-        self._print(f"[dim]Model: {self.config['model']}[/dim]")
-        self._print(f"[dim]/help · /auto · /status · /exit[/dim]\n")
+        self._print(f"[dim]{model_info}[/dim]")
+        self._print(f"[dim]/help · /auto · /provider · /exit[/dim]\n")
 
         # Show resumed messages
         if self.session_messages:
@@ -1618,11 +1723,42 @@ python myfile.py
                 self._save_config()
                 self._print(f"[green]{sym('check')} Switched to: {selected}[/green]")
 
+        elif command == '/provider':
+            # Show provider selection menu
+            provider = show_provider_menu(self.config.get("provider", "ollama"))
+            self.config["provider"] = provider
+
+            if provider == "groq":
+                groq_model = show_groq_model_menu(self.config.get("groq_model", "compound-beta"))
+                self.config["groq_model"] = groq_model
+                self._save_config()
+                self._print(f"[green]{sym('check')} Switched to Groq: {groq_model}[/green]")
+            else:
+                self._save_config()
+                self._print(f"[green]{sym('check')} Switched to Ollama: {self.config['model']}[/green]")
+
+        elif command == '/groq':
+            # Quick switch to Groq
+            self.config["provider"] = "groq"
+            self._save_config()
+            self._print(f"[green]{sym('check')} Provider: Groq ({self.config.get('groq_model', 'compound-beta')})[/green]")
+
+        elif command == '/ollama':
+            # Quick switch to Ollama
+            self.config["provider"] = "ollama"
+            self._save_config()
+            self._print(f"[green]{sym('check')} Provider: Ollama ({self.config['model']})[/green]")
+
         elif command == '/help':
             self._print("""
-[bold]Commands:[/bold]
-  /models        Select model from list
+[bold]Provider:[/bold]
+  /provider      Select provider (Ollama/Groq) + model
+  /groq          Quick switch to Groq
+  /ollama        Quick switch to Ollama
+  /models        Select Ollama model from list
   /model <name>  Set model directly
+
+[bold]Commands:[/bold]
   /mode <m>      Set mode: concise | explain | normal
   /auto          Toggle auto-execute
   /tokens        Show token/context usage
@@ -1734,6 +1870,65 @@ def show_resume_menu():
     return None
 
 
+def show_provider_menu(current_provider="ollama"):
+    """Show provider selection menu (Ollama vs Groq)"""
+    if RICH_AVAILABLE:
+        console.print("\n[bold cyan]DSK[/bold cyan] [dim]- Select Provider[/dim]\n")
+
+    providers = [
+        ("ollama", "Ollama (local/cloud models via ollama)"),
+        ("groq", "Groq API (compound-beta, llama, etc.)"),
+    ]
+
+    for i, (pid, desc) in enumerate(providers, 1):
+        marker = "[green]*[/green]" if pid == current_provider else " "
+        if RICH_AVAILABLE:
+            console.print(f"  {marker} [cyan]{i}.[/cyan] {desc}")
+        else:
+            print(f"  {'*' if pid == current_provider else ' '} {i}. {desc}")
+
+    if RICH_AVAILABLE:
+        console.print()
+
+    try:
+        choice = input(f"  Select [1]: ").strip()
+        if not choice:
+            return current_provider
+        idx = int(choice) - 1
+        if 0 <= idx < len(providers):
+            return providers[idx][0]
+    except (ValueError, IndexError, KeyboardInterrupt, EOFError):
+        pass
+    return current_provider
+
+
+def show_groq_model_menu(current_model="compound-beta"):
+    """Show Groq model selection menu"""
+    if RICH_AVAILABLE:
+        console.print("\n[bold cyan]DSK[/bold cyan] [dim]- Select Groq Model[/dim]\n")
+
+    for i, model in enumerate(GROQ_MODELS, 1):
+        marker = "[green]*[/green]" if model == current_model else " "
+        if RICH_AVAILABLE:
+            console.print(f"  {marker} [cyan]{i}.[/cyan] {model}")
+        else:
+            print(f"  {'*' if model == current_model else ' '} {i}. {model}")
+
+    if RICH_AVAILABLE:
+        console.print()
+
+    try:
+        choice = input(f"  Select [1]: ").strip()
+        if not choice:
+            return current_model
+        idx = int(choice) - 1
+        if 0 <= idx < len(GROQ_MODELS):
+            return GROQ_MODELS[idx]
+    except (ValueError, IndexError, KeyboardInterrupt, EOFError):
+        pass
+    return current_model
+
+
 def main():
     parser = argparse.ArgumentParser(description="DSK - DeepSeek Terminal Agent")
     parser.add_argument("prompt", nargs="*", help="Quick prompt")
@@ -1741,8 +1936,10 @@ def main():
     parser.add_argument("--auto", "-a", action="store_true", help="Auto-execute")
     parser.add_argument("--concise", "-c", action="store_true", help="Concise mode - minimal explanation")
     parser.add_argument("--explain", "-e", action="store_true", help="Explain mode - teaching style")
-    parser.add_argument("--select", "-s", action="store_true", help="Select model at startup")
+    parser.add_argument("--select", "-s", action="store_true", help="Select provider/model at startup")
     parser.add_argument("--model", "-m", type=str, help="Model name directly")
+    parser.add_argument("--groq", "-g", action="store_true", help="Use Groq API")
+    parser.add_argument("--ollama", "-o", action="store_true", help="Use Ollama (default)")
     parser.add_argument("--dir", "-d", type=str, help="Working directory")
 
     args = parser.parse_args()
@@ -1784,15 +1981,36 @@ def main():
     elif args.explain:
         dsk.config["mode"] = "explain"
 
-    # Model selection
-    if args.model:
-        dsk.config["model"] = args.model
-    elif args.select:
-        selected = show_model_menu(dsk.config.get("model"))
-        if selected:
-            dsk.config["model"] = selected
-            dsk._save_config()
+    # Provider selection via flags
+    if args.groq:
+        dsk.config["provider"] = "groq"
+    elif args.ollama:
+        dsk.config["provider"] = "ollama"
 
+    # Interactive provider/model selection
+    if args.select:
+        # First select provider
+        provider = show_provider_menu(dsk.config.get("provider", "ollama"))
+        dsk.config["provider"] = provider
+
+        if provider == "groq":
+            # Select Groq model
+            groq_model = show_groq_model_menu(dsk.config.get("groq_model", "compound-beta"))
+            dsk.config["groq_model"] = groq_model
+        else:
+            # Select Ollama model
+            selected = show_model_menu(dsk.config.get("model"))
+            if selected:
+                dsk.config["model"] = selected
+
+        dsk._save_config()
+
+    # Direct model override
+    if args.model:
+        if dsk.config.get("provider") == "groq":
+            dsk.config["groq_model"] = args.model
+        else:
+            dsk.config["model"] = args.model
 
     if args.prompt:
         dsk.chat(" ".join(args.prompt))
