@@ -892,7 +892,7 @@ python myfile.py
                     model=self.config["model"],
                     messages=messages,
                     stream=True,
-                    options=opts
+                    options={"temperature": self.config["temperature"]}
                 )
 
                 for chunk in stream:
@@ -1283,7 +1283,7 @@ python myfile.py
                     model=self.config["model"],
                     messages=messages,
                     stream=True,
-                    options=opts
+                    options={"temperature": self.config["temperature"]}
                 )
 
                 current_line = ""
