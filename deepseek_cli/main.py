@@ -950,6 +950,23 @@ python myfile.py
         messages.extend(self._get_messages_for_context())
         messages.append({"role": "user", "content": user_message})
 
+        # Groq has stricter payload limits - truncate if needed
+        provider = self.config.get("provider", "ollama")
+        if provider == "groq":
+            MAX_GROQ_CHARS = 100000  # ~25k tokens, safe limit
+            total_chars = sum(len(m.get("content", "")) for m in messages)
+            if total_chars > MAX_GROQ_CHARS:
+                self._print(f"[yellow]{sym('warn')} Context too large for Groq - truncating...[/yellow]")
+                # Keep system prompt + last few messages
+                system_msg = messages[0]
+                user_msg = messages[-1]
+                # Truncate middle messages
+                middle = messages[1:-1]
+                while sum(len(m.get("content", "")) for m in [system_msg] + middle + [user_msg]) > MAX_GROQ_CHARS and len(middle) > 2:
+                    middle = middle[1:]  # Remove oldest messages
+                messages = [system_msg] + middle + [user_msg]
+                self._print(f"[dim]  Reduced to {len(messages)} messages[/dim]")
+
         full_response = ""
         in_code_block = False
         backtick_count = 0
@@ -970,8 +987,6 @@ python myfile.py
         spinner.start()
 
         try:
-            provider = self.config.get("provider", "ollama")
-
             if provider == "groq" and GROQ_SDK:
                 # Use Groq API
                 client = self._get_groq_client()
