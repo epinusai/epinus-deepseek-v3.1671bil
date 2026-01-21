@@ -14,6 +14,7 @@ import subprocess
 import time
 import sqlite3
 import re
+import threading
 from pathlib import Path
 from datetime import datetime
 
@@ -112,6 +113,51 @@ DEFAULT_CONFIG = {
 }
 
 
+class Spinner:
+    """Animated spinner for visual feedback"""
+    FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
+    FRAMES_ASCII = ['|', '/', '-', '\\']
+
+    def __init__(self, message="Thinking"):
+        self.message = message
+        self.running = False
+        self.thread = None
+        self.frames = self.FRAMES if _UNICODE else self.FRAMES_ASCII
+
+    def _spin(self):
+        i = 0
+        while self.running:
+            frame = self.frames[i % len(self.frames)]
+            print(f"\033[2m{frame} {self.message}...\033[0m", end="\r", flush=True)
+            time.sleep(0.1)
+            i += 1
+
+    def start(self):
+        self.running = True
+        self.thread = threading.Thread(target=self._spin, daemon=True)
+        self.thread.start()
+
+    def stop(self):
+        self.running = False
+        if self.thread:
+            self.thread.join(timeout=0.2)
+        print(" " * 40, end="\r", flush=True)  # Clear line
+
+
+def estimate_tokens(text):
+    """Estimate token count (rough: ~4 chars per token for English)"""
+    if not text:
+        return 0
+    return len(text) // 4 + 1
+
+
+def format_tokens(count):
+    """Format token count with K suffix"""
+    if count >= 1000:
+        return f"{count/1000:.1f}k"
+    return str(count)
+
+
 class DSK:
     def __init__(self, working_dir=None, session_id=None):
         CONFIG_DIR.mkdir(exist_ok=True)
@@ -125,6 +171,10 @@ class DSK:
         self.session_db = SESSIONS_DIR / f"session_{self.session_id}.db"
         self.session_messages = []
         self._init_db()
+
+        # Token tracking
+        self.tokens_in = 0
+        self.tokens_out = 0
 
         if session_id:
             self._load_session()
@@ -688,11 +738,16 @@ python myfile.py
         # ANSI color codes
         BLUE = "\033[94m"
         WHITE = "\033[97m"
-        DIM = "\033[2m"
         RESET = "\033[0m"
 
-        # Show thinking indicator
-        print(f"{DIM}Thinking...{RESET}", end="\r", flush=True)
+        # Calculate input tokens (all messages being sent)
+        input_text = json.dumps(messages)
+        input_tokens = estimate_tokens(input_text)
+        self.tokens_in += input_tokens
+
+        # Animated spinner while waiting
+        spinner = Spinner("Thinking")
+        spinner.start()
 
         try:
             if OLLAMA_SDK:
@@ -704,9 +759,9 @@ python myfile.py
                 )
 
                 for chunk in stream:
-                    # Clear "Thinking..." on first token
+                    # Stop spinner on first token
                     if first_token:
-                        print(" " * 20, end="\r", flush=True)  # Clear line
+                        spinner.stop()
                         print(WHITE, end="", flush=True)
                         first_token = False
                     if chunk.message.content:
@@ -745,12 +800,26 @@ python myfile.py
         except KeyboardInterrupt:
             self._print(f"\n[yellow]{sym('warn')} Interrupted[/yellow]")
             return None
+        except KeyboardInterrupt:
+            spinner.stop()
+            self._print(f"\n[yellow]{sym('warn')} Interrupted[/yellow]")
+            return None
         except Exception as e:
+            spinner.stop()
             self._print(f"\n[red]{sym('cross')} Error: {e}[/red]")
             return None
 
         self._save_message("user", user_message)
         self._save_message("assistant", full_response)
+
+        # Track output tokens and show stats
+        output_tokens = estimate_tokens(full_response)
+        self.tokens_out += output_tokens
+        total_context = self.tokens_in + self.tokens_out
+        context_pct = min(100, (total_context / 128000) * 100)  # 128k context window
+
+        self._print(f"\n[dim]  tokens: in={format_tokens(input_tokens)} out={format_tokens(output_tokens)} | context: {format_tokens(total_context)} ({context_pct:.0f}%)[/dim]")
+
         return full_response
 
     def chat(self, message, auto_continue=True):
@@ -1194,7 +1263,34 @@ python myfile.py
 
         elif command == '/clear':
             self.session_messages = []
-            self._print(f"[green]{sym('check')} Session cleared[/green]")
+            self.tokens_in = 0
+            self.tokens_out = 0
+            self._print(f"[green]{sym('check')} Session cleared, context reset[/green]")
+
+        elif command == '/tokens':
+            total = self.tokens_in + self.tokens_out
+            context_pct = min(100, (total / 128000) * 100)
+            self._print(f"\n[bold]Token Usage:[/bold]")
+            self._print(f"  Input:   {format_tokens(self.tokens_in)}")
+            self._print(f"  Output:  {format_tokens(self.tokens_out)}")
+            self._print(f"  Total:   {format_tokens(total)} / 128k ({context_pct:.0f}%)")
+            self._print(f"  Messages: {len(self.session_messages)}")
+            if context_pct > 70:
+                self._print(f"  [yellow]{sym('warn')} Context getting full - consider /compact[/yellow]")
+
+        elif command == '/compact':
+            # Keep only last N messages to free context
+            keep = int(arg) if arg and arg.isdigit() else 10
+            if len(self.session_messages) > keep:
+                removed = len(self.session_messages) - keep
+                self.session_messages = self.session_messages[-keep:]
+                # Recalculate tokens
+                total_text = json.dumps(self.session_messages)
+                self.tokens_in = estimate_tokens(total_text)
+                self.tokens_out = 0
+                self._print(f"[green]{sym('check')} Compacted: kept last {keep} messages, removed {removed}[/green]")
+            else:
+                self._print(f"[dim]Only {len(self.session_messages)} messages - nothing to compact[/dim]")
 
         elif command == '/sessions':
             sessions = self.list_sessions()
@@ -1281,21 +1377,18 @@ python myfile.py
   /model <name>  Set model directly
   /mode <m>      Set mode: concise | explain | normal
   /auto          Toggle auto-execute
+  /tokens        Show token/context usage
+  /compact [n]   Keep only last n messages (default 10)
   /status        Check last task status
   /kill          Kill background task
   /cd <path>     Change directory
-  /ls            List files
   /run <cmd>     Run command directly
   /sessions      List saved sessions
-  /clear         Clear session
+  /clear         Clear session + reset tokens
   /exit          Quit
 
-[bold]CLI flags:[/bold]
-  deepseek --select     Select model at startup
-  deepseek --model X    Use specific model
-  deepseek --concise    Concise mode
-  deepseek --explain    Explain mode
-  deepseek --auto       Auto-execute commands
+[bold]Context:[/bold]
+  128k token limit - /tokens to check, /compact to free
 """)
 
         else:
