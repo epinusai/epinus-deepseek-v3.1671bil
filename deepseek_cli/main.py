@@ -1009,6 +1009,11 @@ python myfile.py
                 else:
                     results.append(f"SKIPPED: {action[1]}")
 
+        # Save command results to session so AI can see them next turn
+        if results:
+            results_summary = "\n".join(results)
+            self._save_message("system", f"[COMMAND RESULTS]\n{results_summary}")
+
         # Auto-continue: feed results back to AI
         if auto_continue and results:
             # Check if user interrupted - don't auto-continue
