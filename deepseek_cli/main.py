@@ -821,6 +821,8 @@ RULES:
 2. For multi-step tasks, say "Next:" to continue automatically
 3. Say "Done." when task is complete
 4. If user asks about status/progress, report the LAST TASK STATUS above
+5. When you find relevant results, CONTINUE exploring - don't stop to ask questions
+6. Be proactive: if user asks to "check" something, explore it fully before stopping
 
 FILE FORMAT:
 ```python
@@ -1024,12 +1026,19 @@ python myfile.py
                 self.chat(f"[AUTO] Results:\n{context}\n\nThere was an error. Please fix it and continue.", auto_continue=True)
             else:
                 # Check if AI wants to continue (look for indicators)
-                should_continue = any(word in response.lower() for word in ['next', 'then', 'now', 'after', 'continue', 'step'])
+                continue_words = ['next', 'then', 'now', 'after', 'continue', 'step', 'let me', "i'll"]
+                stop_words = ['done.', 'complete', 'finished', 'that\'s all', 'let me know']
 
-                if should_continue and len(actions) > 0:
+                should_continue = any(word in response.lower() for word in continue_words)
+                should_stop = any(word in response.lower() for word in stop_words)
+
+                # Also continue if AI asked questions but there are more steps to take
+                asked_questions = '?' in response and len(actions) > 0
+
+                if (should_continue or asked_questions) and not should_stop and len(actions) > 0:
                     self._print(f"\n[dim]  {sym('loop')} Auto-continuing...[/dim]")
                     context = "\n".join(results[-2:])
-                    self.chat(f"[AUTO] Done. Results:\n{context}\n\nContinue with the next step.", auto_continue=True)
+                    self.chat(f"[AUTO] Done. Results:\n{context}\n\nAnalyze the results and continue. If you found what was requested, explore it further.", auto_continue=True)
 
     def interactive(self):
         """Interactive chat loop"""
