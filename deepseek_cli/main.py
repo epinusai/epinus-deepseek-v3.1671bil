@@ -364,7 +364,15 @@ class DSK:
             full_text = json.dumps(self.session_messages)
             recent_tokens = estimate_tokens(full_text)
 
-        context_limit = get_model_context_limit(self.config["model"])
+        # Get context limit based on provider
+        provider = self.config.get("provider", "ollama")
+        if provider == "groq":
+            current_model = self.config.get("groq_model", "compound-beta")
+        elif provider == "anthropic":
+            current_model = self.config.get("anthropic_model", "claude-sonnet-4-20250514")
+        else:
+            current_model = self.config["model"]
+        context_limit = get_model_context_limit(current_model)
         return recent_tokens > (context_limit * self._compaction_threshold)
 
     def _generate_state_summary(self):
@@ -395,14 +403,40 @@ Format as bullet points."""
         ]
 
         try:
-            if OLLAMA_SDK:
+            provider = self.config.get("provider", "ollama")
+
+            if provider == "anthropic" and ANTHROPIC_SDK:
+                client = self._get_anthropic_client()
+                if client:
+                    # Anthropic uses system as separate param
+                    response = client.messages.create(
+                        model=self.config.get("anthropic_model", "claude-sonnet-4-20250514"),
+                        max_tokens=2048,
+                        system=messages[0]["content"],
+                        messages=[messages[1]],
+                    )
+                    return response.content[0].text
+
+            elif provider == "groq" and GROQ_SDK:
+                client = self._get_groq_client()
+                if client:
+                    response = client.chat.completions.create(
+                        model=self.config.get("groq_model", "compound-beta"),
+                        messages=messages,
+                        temperature=0.3,
+                        max_tokens=2048,
+                    )
+                    return response.choices[0].message.content
+
+            elif OLLAMA_SDK:
                 response = ollama.chat(
                     model=self.config["model"],
                     messages=messages,
                     stream=False,
-                    options={"temperature": 0.3}  # Lower temp for accurate summary
+                    options={"temperature": 0.3}
                 )
                 return response.message.content
+
         except Exception as e:
             self._print(f"[red]{sym('cross')} Compaction failed: {e}[/red]")
             return None
