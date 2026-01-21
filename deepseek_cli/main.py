@@ -683,14 +683,16 @@ python myfile.py
         full_response = ""
         in_code_block = False
         backtick_count = 0
+        first_token = True
 
         # ANSI color codes
         BLUE = "\033[94m"
         WHITE = "\033[97m"
+        DIM = "\033[2m"
         RESET = "\033[0m"
 
-        # Start with white for explanations
-        print(WHITE, end="", flush=True)
+        # Show thinking indicator
+        print(f"{DIM}Thinking...{RESET}", end="\r", flush=True)
 
         try:
             if OLLAMA_SDK:
@@ -702,6 +704,11 @@ python myfile.py
                 )
 
                 for chunk in stream:
+                    # Clear "Thinking..." on first token
+                    if first_token:
+                        print(" " * 20, end="\r", flush=True)  # Clear line
+                        print(WHITE, end="", flush=True)
+                        first_token = False
                     if chunk.message.content:
                         text = chunk.message.content
                         full_response += text
