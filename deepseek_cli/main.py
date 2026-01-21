@@ -48,16 +48,17 @@ except ImportError:
 
 # Prompt toolkit for input & menus
 try:
-    from prompt_toolkit import prompt as pt_prompt
+    from prompt_toolkit import prompt as pt_prompt, PromptSession
     from prompt_toolkit.history import FileHistory
     from prompt_toolkit.styles import Style as PTStyle
     from prompt_toolkit.key_binding import KeyBindings
     from prompt_toolkit.keys import Keys
     from prompt_toolkit.application import Application
-    from prompt_toolkit.layout import Layout
-    from prompt_toolkit.layout.containers import Window
+    from prompt_toolkit.layout import Layout, ScrollablePane
+    from prompt_toolkit.layout.containers import Window, HSplit, VSplit
     from prompt_toolkit.layout.controls import FormattedTextControl
-    from prompt_toolkit.formatted_text import HTML
+    from prompt_toolkit.formatted_text import HTML, ANSI
+    from prompt_toolkit.widgets import TextArea
     PROMPT_TOOLKIT = True
 except ImportError:
     PROMPT_TOOLKIT = False
@@ -804,7 +805,7 @@ python app.py
                     self.chat(f"[AUTO] Done. Results:\n{context}\n\nContinue with the next step.", auto_continue=True)
 
     def interactive(self):
-        """Interactive chat loop"""
+        """Interactive chat loop with input at bottom"""
         # Show header
         if RICH_AVAILABLE:
             model = self.config['model'][:40]
@@ -827,23 +828,27 @@ python app.py
         history_file = CONFIG_DIR / "history.txt"
         history = FileHistory(str(history_file)) if PROMPT_TOOLKIT else None
 
+        # Create prompt session with bottom toolbar
+        if PROMPT_TOOLKIT:
+            session = PromptSession(
+                history=history,
+                style=PTStyle.from_dict({
+                    'prompt': '#00aaff bold',
+                    'bottom-toolbar': 'bg:#333333 #888888',
+                }),
+                bottom_toolbar=lambda: HTML(
+                    f'<b>[{Path(self.working_dir).name}]</b> '
+                    f'<style fg="#666666">/help · /status · /exit</style>'
+                ),
+            )
+
         while True:
             try:
-                # Visual separator
-                self._print(f"\n[dim]{'─' * 60}[/dim]")
-
-                # Get input with history support
+                # Get input
                 dir_name = Path(self.working_dir).name
-                if PROMPT_TOOLKIT and history:
-                    style = PTStyle.from_dict({
-                        'prompt': '#00aaff bold',
-                        'path': '#888888',
-                    })
-                    prompt_msg = [
-                        ('class:path', f'[{dir_name}] '),
-                        ('class:prompt', '› '),
-                    ]
-                    user_input = pt_prompt(prompt_msg, history=history, style=style).strip()
+                if PROMPT_TOOLKIT and session:
+                    prompt_msg = [('class:prompt', '› ')]
+                    user_input = session.prompt(prompt_msg).strip()
                 else:
                     print(f"[{dir_name}] › ", end="", flush=True)
                     user_input = input().strip()
