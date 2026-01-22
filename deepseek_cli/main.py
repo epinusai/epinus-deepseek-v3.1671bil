@@ -991,9 +991,18 @@ python myfile.py
             content = content.strip()
             lang = (lang or '').lower()
 
-            # File creation
-            if content.startswith('# filename:') or content.startswith('// filename:'):
-                filename = content.split('\n')[0].split(':', 1)[1].strip()
+            # File creation - support multiple comment styles
+            # # filename: (Python, Shell, YAML, etc.)
+            # // filename: (JavaScript, C, Go, etc.)
+            # <!-- filename: --> (HTML, XML)
+            first_line = content.split('\n')[0].strip()
+            if first_line.startswith('# filename:') or first_line.startswith('// filename:'):
+                filename = first_line.split(':', 1)[1].strip()
+                file_content = '\n'.join(content.split('\n')[1:])
+                actions.append(('file', filename, file_content))
+            elif first_line.startswith('<!-- filename:') and first_line.endswith('-->'):
+                # HTML comment style: <!-- filename: path/to/file.html -->
+                filename = first_line.replace('<!-- filename:', '').replace('-->', '').strip()
                 file_content = '\n'.join(content.split('\n')[1:])
                 actions.append(('file', filename, file_content))
             # Shell command
